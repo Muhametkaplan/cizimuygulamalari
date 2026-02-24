@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <!-- Mobil cihazlar için özel meta etiket: Yakınlaştırmayı ve ölçeklemeyi kilitler -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hogwarts Büyü Simülatörü</title>
+    <!-- MediaPipe kütüphaneleri (El izleme için) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <!-- Tailwind CSS (Arayüz tasarımı için) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&display=swap');
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0f172a; /* Gece mavisi/siyah arka plan */
+            color: #e2e8f0;
+            font-family: 'Cinzel Decorative', cursive; /* Sihirli bir font */
+            touch-action: none; /* Mobilde parmakla kaydırmayı tamamen engeller */
+            -webkit-user-select: none; /* Metin seçimini engeller */
+            user-select: none;
+        }
+
+        /* Kamera görüntüsü */
+        #video_element {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            transform: scaleX(-1); /* Ayna efekti */
+            opacity: 0.3; /* Biraz karanlık ve gizemli olsun */
+            z-index: 1;
+        }
+
+        /* Çizim ve Efekt Canvas'ı */
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 10;
+            pointer-events: none; /* Tıklamaları engellememesi için */
+        }
+
+        /* Kullanıcı Arayüzü */
+        #ui_layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 20;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 1rem;
+        }
+
+        @media (min-width: 640px) {
+            #ui_layer { padding: 2rem; }
+        }
+
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px); /* Safari desteği */
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 1rem;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+            transition: all 0.3s ease;
+        }
+
+        #spell_alert {
+            opacity: 0;
+            transform: translateY(-20px);
+            transition: all 0.5s ease;
+            text-shadow: 0 0 20px currentColor;
+        }
+
+        .show-spell {
+            opacity: 1 !important;
+            transform: translateY(0) !important;
+        }
+
+        /* Yükleniyor ekranı */
+        #loading {
+            position: fixed;
+            inset: 0;
+            background: #0f172a;
+            z-index: 50;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        
+        .loader {
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top: 4px solid #facc15;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* Yeni Ekran Efektleri */
+        .screen-flash {
+            box-shadow: inset 0 0 150px currentColor;
+            transition: box-shadow 0.3s ease-out;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Başlangıç ve İzin Ekranı (Mobil için zorunlu kullanıcı etkileşimi) -->
+    <div id="loading">
+        <h2 class="text-3xl sm:text-4xl text-yellow-400 text-center mb-2">Hogwarts Ekspresi</h2>
+        <p class="text-sm sm:text-base text-gray-400 text-center max-w-md px-4 mb-8">
+            Sihir dünyasına bağlanmak için kameranıza izin vermeniz gerekmektedir. Telefonunuzu sabit tutun ve işaret parmağınızı asanız olarak kullanın.
+        </p>
+        
+        <button id="start_magic_btn" class="glass-panel px-8 py-4 text-yellow-300 font-bold text-xl hover:bg-yellow-900/40 border-yellow-500/30 active:scale-95 transition-transform pointer-events-auto cursor-pointer">
+            ✨ Sihre Başla ✨
+        </button>
+
+        <div id="loader_spinner" class="loader mt-6 hidden"></div>
+        <p id="loading_text" class="text-sm mt-4 text-yellow-200 hidden text-center px-4">Asa hazırlanıyor...</p>
+    </div>
+
+    <!-- Kamera: Mobilde çalışması için muted ve playsinline etiketleri çok önemlidir -->
+    <video id="video_element" autoplay playsinline muted></video>
+
+    <!-- Asanın izini çizeceğimiz canvas -->
+    <canvas id="trail_canvas"></canvas>
+    
+    <!-- Büyü efektlerini çizeceğimiz canvas -->
+    <canvas id="fx_canvas"></canvas>
+
+    <!-- Arayüz -->
+    <div id="ui_layer">
+        
+        <!-- Üst Bar: Büyü Kitabı ve Kontroller -->
+        <div class="flex flex-col-reverse sm:flex-row justify-between items-start w-full gap-4 pointer-events-none">
+            
+            <!-- Büyü Kitabı (Sol Üst) -->
+            <div class="glass-panel p-3 sm:p-4 w-48 sm:w-64 max-h-[40vh] sm:max-h-none overflow-y-auto pointer-events-auto">
+                <h2 class="text-lg sm:text-xl text-yellow-400 border-b border-yellow-400/30 pb-1 sm:pb-2 mb-2 sm:mb-4">Büyü Kitabı</h2>
+                <ul class="space-y-3 sm:space-y-4 text-xs sm:text-sm">
+                    <li class="flex items-center gap-2 sm:gap-3">
+                        <div class="w-6 h-6 sm:w-8 sm:h-8 rounded-full border-2 border-yellow-200 flex items-center justify-center text-yellow-200 font-sans font-bold text-[10px] sm:text-base">O</div>
+                        <div>
+                            <span class="block text-yellow-200 font-bold">Lumos</span>
+                            <span class="text-[10px] sm:text-xs text-gray-400">Daire çiz</span>
+                        </div>
+                    </li>
+                    <li class="flex items-center gap-2 sm:gap-3">
+                        <div class="w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center text-red-500 font-sans font-bold text-lg sm:text-xl">^</div>
+                        <div>
+                            <span class="block text-red-400 font-bold">Incendio</span>
+                            <span class="text-[10px] sm:text-xs text-gray-400">Üçgen çiz</span>
+                        </div>
+                    </li>
+                    <li class="flex items-center gap-2 sm:gap-3">
+                        <div class="w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center text-green-500 font-sans font-bold text-lg sm:text-xl">⚡</div>
+                        <div>
+                            <span class="block text-green-400 font-bold">Avada Kedavra</span>
+                            <span class="text-[10px] sm:text-xs text-gray-400">Şimşek çiz</span>
+                        </div>
+                    </li>
+                    <li class="flex items-center gap-2 sm:gap-3">
+                        <div class="w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center text-blue-400 font-sans font-bold text-lg sm:text-xl">~</div>
+                        <div>
+                            <span class="block text-blue-400 font-bold">Aguamenti</span>
+                            <span class="text-[10px] sm:text-xs text-gray-400">Dalga çiz</span>
+                        </div>
+                    </li>
+                    <li class="flex items-center gap-2 sm:gap-3">
+                        <div class="w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center text-purple-400 font-sans font-bold text-lg sm:text-xl">☐</div>
+                        <div>
+                            <span class="block text-purple-400 font-bold">Protego</span>
+                            <span class="text-[10px] sm:text-xs text-gray-400">Kare çiz</span>
+                        </div>
+                    </li>
+                    <li class="flex items-center gap-2 sm:gap-3">
+                        <div class="w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center text-orange-400 font-sans font-bold text-lg sm:text-xl">V</div>
+                        <div>
+                            <span class="block text-orange-400 font-bold">Expelliarmus</span>
+                            <span class="text-[10px] sm:text-xs text-gray-400">V harfi çiz</span>
+                        </div>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- Sistemi Durdur/Başlat Butonu (Sağ Üst) -->
+            <button id="toggle_system_btn" class="glass-panel px-4 py-2 sm:px-6 sm:py-3 text-red-400 font-bold hover:bg-red-900/30 pointer-events-auto cursor-pointer flex items-center gap-2 self-end sm:self-auto text-sm sm:text-base">
+                <span id="toggle_icon">🛑</span>
+                <span id="toggle_text" class="hidden sm:inline">Sistemi Durdur</span>
+            </button>
+        </div>
+
+        <!-- Büyü İsmi Gösterimi (Ortada) -->
+        <div class="flex justify-center w-full absolute top-1/4 left-0">
+            <h1 id="spell_alert" class="text-4xl sm:text-6xl font-bold text-center drop-shadow-2xl pointer-events-none">LUMOS!</h1>
+        </div>
+
+        <!-- Talimatlar (Alt Orta) -->
+        <div class="glass-panel p-3 sm:p-4 mx-auto text-center max-w-sm sm:max-w-lg mb-2 sm:mb-4 pointer-events-auto mt-auto">
+            <p class="text-yellow-100 text-xs sm:text-base">
+                <strong class="text-yellow-400">Nasıl Kullanılır?</strong><br>
+                Elini kameraya göster. İşaret ve başparmağını <b>birleştirerek</b> havada şekil çizmeye başla. Şekil bitince parmaklarını <b>ayır</b>.
+            </p>
+        </div>
+    </div>
+
+<script>
+/**
+ * HOGWARTS BÜYÜ SİMÜLATÖRÜ - ANA KOD
+ * Bu kod üç temel bölümden oluşur:
+ * 1. El izleme ve Yumuşatma (Smoothing)
+ * 2. Hareket Tanıma (Varyasyon destekli $1 Algoritması)
+ * 3. Parçacık Efektleri
+ */
+
+const videoElement = document.getElementById('video_element');
+const trailCanvas = document.getElementById('trail_canvas');
+const fxCanvas = document.getElementById('fx_canvas');
+const trailCtx = trailCanvas.getContext('2d');
+const fxCtx = fxCanvas.getContext('2d');
+const spellAlert = document.getElementById('spell_alert');
+
+let width, height;
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    trailCanvas.width = width;
+    trailCanvas.height = height;
+    fxCanvas.width = width;
+    fxCanvas.height = height;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ==========================================
+// 1. EL İZLEME VE ÇİZİM DURUMU
+// ==========================================
+let isDrawing = false;
+let currentStroke = [];
+let wandPos = { x: 0, y: 0 };
+let smoothX = null;
+let smoothY = null;
+let isSystemRunning = true;
+let camera = null;
+
+// MediaPipe Hands Kurulumu
+const hands = new Hands({locateFile: (file) => {
+    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+}});
+hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1, // Mobilde performansı artırmak için 1'de tutuyoruz
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.7
+});
+
+hands.onResults(onResults);
+
+// --- MOBİL İZİN VE BAŞLATMA MANTIĞI ---
+const startBtn = document.getElementById('start_magic_btn');
+const loadingScreen = document.getElementById('loading');
+const loaderSpinner = document.getElementById('loader_spinner');
+const loadingText = document.getElementById('loading_text');
+
+startBtn.addEventListener('click', async () => {
+    // UI Güncellemesi
+    startBtn.style.display = 'none';
+    loaderSpinner.style.display = 'block';
+    loadingText.style.display = 'block';
+    loadingText.innerHTML = "Kamera izni bekleniyor...<br><span class='text-xs opacity-70'>Ekranda çıkan pencerede 'İzin Ver'e dokunun.</span>";
+
+    try {
+        // Tarayıcı desteği kontrolü
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("Tarayıcınız kamera erişimini desteklemiyor.");
+        }
+
+        // 1. Önce doğrudan ve açık bir şekilde Chrome'dan izin istiyoruz
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        
+        loadingText.innerHTML = "İzin alındı! Sihir yükleniyor...<br><span class='text-xs opacity-70'>Lütfen bekleyin.</span>";
+
+        // 2. İzin alındıktan sonra MediaPipe'ı başlatıyoruz
+        camera = new Camera(videoElement, {
+            onFrame: async () => {
+                if(isSystemRunning) {
+                    await hands.send({image: videoElement});
+                }
+            },
+            width: 1280,
+            height: 720,
+            facingMode: 'user'
+        });
+
+        await camera.start();
+        loadingScreen.style.display = 'none';
+
+    } catch (err) {
+        console.error("Kamera hatası:", err);
+        loaderSpinner.style.display = 'none';
+        loadingText.style.display = 'none';
+        startBtn.style.display = 'block';
+        startBtn.classList.replace('text-xl', 'text-base'); // Metni sığdırmak için küçült
+
+        // Chrome Android için özel hata mesajları ve yönlendirme
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            startBtn.innerHTML = `
+                ❌ Kamera İzni Engellendi!<br>
+                <div class="text-sm font-normal text-left bg-black/40 p-3 mt-3 rounded-lg border border-red-500/30">
+                    Kamerayı açmak için şu adımları izleyin:<br>
+                    <ol class="list-decimal ml-4 mt-2 space-y-1">
+                        <li>En üstteki adres çubuğunda bulunan <b>Ayar</b> simgesine (veya 🔒 kilit) dokunun.</li>
+                        <li><b>İzinler</b> (Permissions) menüsüne girin.</li>
+                        <li><b>Kamera</b>'yı bulup <b>İzin Ver</b>'i seçin.</li>
+                        <li>Bu sayfayı <b>Yenileyin</b> ve tekrar deneyin.</li>
+                    </ol>
+                </div>
+            `;
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            startBtn.innerHTML = "❌ Kamera Bulunamadı!<br><span class='text-sm font-normal'>Cihazınızda kullanıma uygun bir kamera tespit edilemedi.</span>";
+        } else {
+            startBtn.innerHTML = `❌ Bir Hata Oluştu!<br><span class='text-sm font-normal'>${err.message}</span>`;
+        }
+    }
+});
+
+
+// Sistemi Durdur/Başlat Kontrolü
+const toggleSystemBtn = document.getElementById('toggle_system_btn');
+const toggleText = document.getElementById('toggle_text');
+const toggleIcon = document.getElementById('toggle_icon');
+
+toggleSystemBtn.addEventListener('click', () => {
+    if(!camera) return; // Henüz başlatılmadıysa işlem yapma
+
+    if (isSystemRunning) {
+        isSystemRunning = false;
+        camera.stop(); 
+        
+        trailCtx.clearRect(0, 0, width, height);
+        smoothX = null;
+        smoothY = null;
+        isDrawing = false;
+        currentStroke = [];
+        
+        toggleText.textContent = 'Sistemi Başlat';
+        toggleIcon.textContent = '▶️';
+        toggleSystemBtn.classList.remove('text-red-400', 'hover:bg-red-900/30');
+        toggleSystemBtn.classList.add('text-green-400', 'hover:bg-green-900/30');
+        
+        spellAlert.innerHTML = `SİSTEM DURDURULDU<br><span class="text-sm sm:text-xl text-gray-300">Devam etmek için butona tıklayın</span>`;
+        spellAlert.style.color = '#9ca3af';
+        spellAlert.classList.add('show-spell');
+        setTimeout(() => spellAlert.classList.remove('show-spell'), 2500);
+
+    } else {
+        isSystemRunning = true;
+        camera.start();
+        
+        toggleText.textContent = 'Sistemi Durdur';
+        toggleIcon.textContent = '🛑';
+        toggleSystemBtn.classList.remove('text-green-400', 'hover:bg-green-900/30');
+        toggleSystemBtn.classList.add('text-red-400', 'hover:bg-red-900/30');
+    }
+});
+
+function onResults(results) {
+    if (!isSystemRunning) return; 
+    
+    trailCtx.clearRect(0, 0, width, height);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        
+        const indexTip = landmarks[8];
+        const thumbTip = landmarks[4];
+
+        const rawX = (1 - indexTip.x) * width;
+        const rawY = indexTip.y * height;
+        
+        if (smoothX === null) {
+            smoothX = rawX;
+            smoothY = rawY;
+        } else {
+            smoothX += (rawX - smoothX) * 0.5;
+            smoothY += (rawY - smoothY) * 0.5;
+        }
+
+        wandPos = { x: smoothX, y: smoothY };
+
+        const tx = (1 - thumbTip.x) * width;
+        const ty = thumbTip.y * height;
+        const distance = Math.hypot(rawX - tx, rawY - ty);
+        
+        // Mobilde ekran dar olduğu için çimdikleme eşiğini biraz daha toleranslı yapabiliriz
+        const pinchThreshold = Math.min(width * 0.08, 45); 
+
+        drawWandTip(smoothX, smoothY, isDrawing);
+
+        if (distance < pinchThreshold) {
+            if (!isDrawing) {
+                isDrawing = true;
+                currentStroke = [];
+            }
+            
+            let lastPoint = currentStroke[currentStroke.length - 1];
+            if (!lastPoint || Math.hypot(smoothX - lastPoint.x, smoothY - lastPoint.y) > 4) {
+                currentStroke.push({ x: smoothX, y: smoothY });
+            }
+            drawTrail();
+        } else {
+            if (isDrawing) {
+                isDrawing = false;
+                if (currentStroke.length > 8) {
+                    recognizeSpell(currentStroke);
+                }
+                currentStroke = [];
+            }
+        }
+    } else {
+        smoothX = null;
+        smoothY = null;
+    }
+}
+
+function drawWandTip(x, y, active) {
+    trailCtx.beginPath();
+    trailCtx.arc(x, y, active ? 12 : 6, 0, 2 * Math.PI);
+    trailCtx.fillStyle = active ? '#facc15' : '#94a3b8';
+    trailCtx.shadowBlur = active ? 20 : 5;
+    trailCtx.shadowColor = active ? '#facc15' : '#ffffff';
+    trailCtx.fill();
+    trailCtx.shadowBlur = 0;
+
+    if (!active && Math.random() > 0.5) {
+        let dust = new Particle(x + (Math.random()-0.5)*10, y + (Math.random()-0.5)*10, 'Lumos');
+        dust.size = Math.random() * 2 + 1;
+        dust.color = '#94a3b8'; 
+        dust.vy = Math.random() * 2; 
+        dust.vx = (Math.random()-0.5) * 1;
+        dust.decay = 0.05;
+        particles.push(dust);
+    }
+}
+
+function drawTrail() {
+    if (currentStroke.length < 2) return;
+    trailCtx.beginPath();
+    trailCtx.moveTo(currentStroke[0].x, currentStroke[0].y);
+    for (let i = 1; i < currentStroke.length; i++) {
+        trailCtx.lineTo(currentStroke[i].x, currentStroke[i].y);
+    }
+    trailCtx.strokeStyle = 'rgba(250, 204, 21, 0.8)';
+    trailCtx.lineWidth = 6;
+    trailCtx.lineCap = 'round';
+    trailCtx.lineJoin = 'round';
+    trailCtx.shadowBlur = 15;
+    trailCtx.shadowColor = '#facc15';
+    trailCtx.stroke();
+    trailCtx.shadowBlur = 0;
+}
+
+// ==========================================
+// 2. HAREKET TANIMA ALGORİTMASI ($1 Basitleştirilmiş + Varyasyonlar)
+// ==========================================
+const templates = {
+    'Lumos': { pts: generateCircle(), closed: true },
+    'Incendio': { pts: generateTriangle(), closed: true },
+    'Avada Kedavra': { pts: generateLightning(), closed: false },
+    'Aguamenti': { pts: generateWave(), closed: false },
+    'Protego': { pts: generateSquare(), closed: true },
+    'Expelliarmus': { pts: generateV(), closed: false }
+};
+
+function generateCircle() {
+    let pts = [];
+    for(let i=0; i<32; i++) {
+        let angle = (i/32) * Math.PI * 2;
+        pts.push({x: Math.cos(angle), y: Math.sin(angle)});
+    }
+    return pts;
+}
+
+function generateTriangle() {
+    return resample([{x:0,y:1}, {x:0.5,y:0}, {x:1,y:1}, {x:0,y:1}], 32);
+}
+
+function generateLightning() {
+    return resample([{x:0.5,y:0}, {x:0,y:0.6}, {x:0.8,y:0.6}, {x:0.2,y:1}], 32);
+}
+
+function generateWave() {
+    let pts = [];
+    for(let i=0; i<32; i++) {
+        let x = i/31;
+        let y = Math.sin(x * Math.PI * 2) * 0.5;
+        pts.push({x: x, y: y});
+    }
+    return pts;
+}
+
+function generateSquare() {
+    return resample([{x:0,y:0}, {x:1,y:0}, {x:1,y:1}, {x:0,y:1}, {x:0,y:0}], 32);
+}
+
+function generateV() {
+    return resample([{x:0,y:0}, {x:0.5,y:1}, {x:1,y:0}], 32);
+}
+
+function getVariations(pts, isClosed) {
+    let variations = [];
+    variations.push(pts); 
+    let rev = [...pts].reverse();
+    variations.push(rev); 
+    
+    if (isClosed) {
+        for (let shift of [8, 16, 24]) { 
+            variations.push([...pts.slice(shift), ...pts.slice(0, shift)]);
+            variations.push([...rev.slice(shift), ...rev.slice(0, shift)]);
+        }
+    }
+    return variations;
+}
+
+const templateVariations = {};
+for (const [name, data] of Object.entries(templates)) {
+    let normTemplate = normalize(data.pts);
+    templateVariations[name] = getVariations(normTemplate, data.closed);
+}
+
+function recognizeSpell(stroke) {
+    let points = resample(stroke, 32);
+    points = normalize(points);
+
+    let bestMatch = "Bilinmeyen Büyü";
+    let bestDist = Infinity;
+
+    for (const [name, variations] of Object.entries(templateVariations)) {
+        for (let v of variations) {
+            let dist = pathDistance(points, v);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestMatch = name;
+            }
+        }
+    }
+
+    if (bestDist < 0.32) { 
+        let accuracy = Math.floor(100 - (bestDist * (100 / 0.32)));
+        accuracy = Math.max(0, Math.min(100, accuracy)); 
+        castSpell(bestMatch, wandPos.x, wandPos.y, accuracy);
+    }
+}
+
+function pathDistance(pts1, pts2) {
+    let d = 0;
+    for(let i=0; i<pts1.length; i++) {
+        d += Math.hypot(pts1[i].x - pts2[i].x, pts1[i].y - pts2[i].y);
+    }
+    return d / pts1.length;
+}
+
+function resample(points, n) {
+    let pathLength = 0;
+    for(let i=1; i<points.length; i++) {
+        pathLength += Math.hypot(points[i].x - points[i-1].x, points[i].y - points[i-1].y);
+    }
+    let interval = pathLength / (n - 1);
+    let newPoints = [points[0]];
+    let D = 0;
+    for(let i=1; i<points.length; i++) {
+        let d = Math.hypot(points[i].x - points[i-1].x, points[i].y - points[i-1].y);
+        if ((D + d) >= interval) {
+            let qx = points[i-1].x + ((interval - D) / d) * (points[i].x - points[i-1].x);
+            let qy = points[i-1].y + ((interval - D) / d) * (points[i].y - points[i-1].y);
+            let q = {x: qx, y: qy};
+            newPoints.push(q);
+            points.splice(i, 0, q); 
+            D = 0;
+        } else {
+            D += d;
+        }
+    }
+    if (newPoints.length == n - 1) newPoints.push(points[points.length - 1]);
+    return newPoints;
+}
+
+function normalize(points) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    points.forEach(p => {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    });
+    
+    let boxWidth = maxX - minX;
+    let boxHeight = maxY - minY;
+    
+    if (boxWidth === 0) boxWidth = 1;
+    if (boxHeight === 0) boxHeight = 1;
+    
+    return points.map(p => ({
+        x: (p.x - minX) / boxWidth,
+        y: (p.y - minY) / boxHeight
+    }));
+}
+
+// ==========================================
+// 3. BÜYÜ EFEKTLERİ (PARÇACIK SİSTEMİ)
+// ==========================================
+let particles = [];
+
+class Particle {
+    constructor(x, y, type) {
+        this.x = x;
+        this.y = y;
+        this.type = type;
+        this.life = 1.0; 
+        
+        // Mobilde performansı artırmak için parçacık boyutlarını ekran boyutuna göre ölçekle
+        const isMobile = window.innerWidth < 640;
+        const scale = isMobile ? 0.7 : 1.0;
+
+        switch(type) {
+            case 'Lumos':
+                this.vx = (Math.random() - 0.5) * 10 * scale;
+                this.vy = (Math.random() - 0.5) * 10 * scale;
+                this.color = '#fef08a'; 
+                this.size = (Math.random() * 8 + 4) * scale;
+                this.decay = 0.02;
+                break;
+            case 'Incendio':
+                this.vx = (Math.random() - 0.5) * 8 * scale;
+                this.vy = ((Math.random() * -10) - 2) * scale; 
+                this.color = Math.random() > 0.5 ? '#ef4444' : '#f97316'; 
+                this.size = (Math.random() * 15 + 5) * scale;
+                this.decay = 0.03;
+                break;
+            case 'Avada Kedavra':
+                this.vx = (Math.random() - 0.5) * 30 * scale; 
+                this.vy = (Math.random() - 0.5) * 30 * scale;
+                this.color = '#22c55e'; 
+                this.size = (Math.random() * 5 + 2) * scale;
+                this.decay = 0.05;
+                break;
+            case 'Aguamenti':
+                this.vx = (Math.random() - 0.5) * 6 * scale;
+                this.vy = ((Math.random() * 5) + 2) * scale; 
+                this.color = '#60a5fa'; 
+                this.size = (Math.random() * 10 + 3) * scale;
+                this.decay = 0.015;
+                break;
+            case 'Protego':
+                let angle = Math.random() * Math.PI * 2;
+                let speed = (Math.random() * 8 + 2) * scale;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.color = '#c084fc'; 
+                this.size = (Math.random() * 6 + 4) * scale;
+                this.decay = 0.02;
+                break;
+            case 'Expelliarmus':
+                this.vx = (Math.random() - 0.5) * 20 * scale;
+                this.vy = (Math.random() - 0.5) * 20 * scale;
+                this.color = '#fb923c'; 
+                this.size = (Math.random() * 8 + 2) * scale;
+                this.decay = 0.04;
+                break;
+        }
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= this.decay;
+        
+        if (this.type === 'Aguamenti') {
+            this.vy += 0.3; 
+        }
+    }
+
+    draw(ctx) {
+        ctx.globalAlpha = Math.max(0, this.life);
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, Math.max(0, this.size * this.life), 0, Math.PI * 2);
+        
+        ctx.shadowBlur = window.innerWidth < 640 ? 5 : 10; // Mobilde daha az gölge = yüksek performans
+        ctx.shadowColor = this.color;
+        
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+const bodyEl = document.body;
+
+function castSpell(spellName, x, y, accuracy) {
+    if (!isSystemRunning) return;
+
+    // Mobilde metin boyutlarını düzenlemek için sınıfları ayarlıyoruz
+    const textClass = window.innerWidth < 640 ? "text-xl" : "text-3xl";
+    spellAlert.innerHTML = `${spellName.toUpperCase()}!<br><span class="${textClass} text-gray-300">%${accuracy} Mükemmel</span>`;
+    
+    if(spellName === 'Lumos') {
+        spellAlert.style.color = '#fef08a';
+        bodyEl.style.color = '#fef08a';
+        bodyEl.classList.add('screen-flash'); 
+    }
+    if(spellName === 'Incendio') spellAlert.style.color = '#ef4444';
+    if(spellName === 'Avada Kedavra') spellAlert.style.color = '#22c55e';
+    if(spellName === 'Aguamenti') spellAlert.style.color = '#60a5fa';
+    if(spellName === 'Protego') spellAlert.style.color = '#c084fc';
+    if(spellName === 'Expelliarmus') spellAlert.style.color = '#fb923c';
+
+    spellAlert.classList.add('show-spell');
+    
+    setTimeout(() => {
+        spellAlert.classList.remove('show-spell');
+        bodyEl.classList.remove('screen-flash');
+    }, 2000);
+
+    // Mobilde cihaz ısınmasını önlemek için parçacık sayısını yarı yarıya düşürüyoruz
+    const isMobile = window.innerWidth < 640;
+    let baseParticleCount = spellName === 'Avada Kedavra' ? 200 : (spellName === 'Protego' ? 150 : 100);
+    let particleCount = isMobile ? Math.floor(baseParticleCount / 2) : baseParticleCount;
+    
+    if (spellName === 'Avada Kedavra') {
+        bodyEl.style.backgroundColor = 'rgba(34, 197, 94, 0.4)';
+        setTimeout(() => bodyEl.style.backgroundColor = '#0f172a', 150);
+    }
+
+    for (let i = 0; i < particleCount; i++) {
+        particles.push(new Particle(x, y, spellName));
+    }
+}
+
+function animateFX() {
+    fxCtx.clearRect(0, 0, width, height);
+    
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.update();
+        p.draw(fxCtx);
+        if (p.life <= 0) {
+            particles.splice(i, 1);
+        }
+    }
+    requestAnimationFrame(animateFX);
+}
+animateFX();
+
+</script>
+</body>
+</html>
